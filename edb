@@ -1,0 +1,153 @@
+#!/bin/bash
+# -------------------------------------------------------------------------
+# edb: wrapper for emacs gud
+#      With emacs gud, we are able to see source code, browse it, and
+#      so on while debugging
+#
+# Copyright 2016 by Yonghyun Hwang <freeaion@gmail.com>
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+# Some rights reserved.
+# -------------------------------------------------------------------------
+
+#-------------------------------------------------------------
+# Global constants
+#-------------------------------------------------------------
+EDB_GCONST_VERSION="1.0"
+
+#-------------------------------------------------------------
+# Global variables
+#-------------------------------------------------------------
+EDB_GVAL_INIT=""
+EDB_GVAL_SRC_DIR=""
+EDB_GVAL_GDB_ARGS=""
+
+#-------------------------------------------------------------
+# Function definitions
+#-------------------------------------------------------------
+# print usage
+function edb_prt_cmd_heading
+{
+    echo "======================"
+    echo "edb $1: wrapper for emacs gud"
+    echo ""
+}
+
+function edb_prt_usage
+{
+    edb_prt_cmd_heading ${EDB_GCONST_VERSION}
+    echo 1>&2 Usage: edb "[options] [EXE] [CORE|PID]"
+    echo " + options:"
+    echo "     --init|-i     specify gdb init script"
+    echo "     --sdir|-s     specify source dir"
+    echo "                   NOTE: default, meaning not specified, is current dir"
+    echo ""
+    echo " + key bindings while debugging:"
+    echo "       \"ctrl-x ctrl-c\": exit"
+    echo "       \"ctrl-x o\"     : switch between source & gdb frames"
+    echo "       NOTE: all gdb commands are available in gdb frame"
+    echo ""
+    echo " + examples:"
+    echo "    1) debug a.out"
+    echo "       > edb a.out"
+    echo "       > edb a.out core # debug w/ coredump"
+    echo ""
+    echo "    2) attach edb to a.out whose pid is 1234"
+    echo "       > edb a.out 1234"
+    echo ""
+    echo "    2) debug a.out using source dir, src_dir"
+    echo "       > edb -s src_dir a.out"
+    echo ""
+}
+
+function edb_cmd_parse
+{
+    if [ -z $1 ]; then
+        edb_prt_usage
+        exit 0
+    fi
+
+    # parse cmd args
+    while [ $# -gt 0 ]; do    # Until you run out of parameters . . .
+    case "$1" in
+        --init|-i)
+            EDB_GVAL_INIT="$2"
+            shift
+            ;;
+        --sdir|-s)
+            EDB_GVAL_SRC_DIR="$2"
+            shift
+            ;;
+        -*)
+            printf "error. invalid option, \"$1\".\n"
+            return 1
+            ;;
+        * )
+            EDB_GVAL_GDB_ARGS="${EDB_GVAL_GDB_ARGS} $1"
+            ;;
+    esac
+    shift # Check next set of parameters.
+    done
+
+    # sanity check for the args
+    if [ ! -z ${EDB_GVAL_INIT} ] && [ ! -f ${EDB_GVAL_INIT} ]; then
+        printf "error. given init file, ${EDB_GVAL_INIT}, is invalid\n"
+        return 1
+    fi
+
+    if [ ! -z ${EDB_GVAL_SRC_DIR} ] && [ ! -d ${EDB_GVAL_SRC_DIR} ]; then
+        printf "error. given source dir for debugging, ${EDB_GVAL_SRC_DIR}, is invalid\n"
+        return 1
+    fi
+
+    if [ -z "${EDB_GVAL_GDB_ARGS}" ]; then
+        printf "error. no exe file is given\n"
+        return 1
+    fi
+
+    return 0
+}
+
+
+##############################################
+# Main script starts from here!
+
+if ! which emacs >& /dev/null; then
+    printf "sorry. you cannot use the script without emacs\n"
+    exit 1
+fi
+
+if ! edb_cmd_parse $@; then
+    printf "fail to parse cmd args. stop\n"
+    exit 1
+fi
+
+kernel="`uname -s`"
+if [ ${kernel} = "Linux" ]; then
+
+    gdbopts="\"gdb"
+    if [ ! -z ${EDB_GVAL_INIT} ]; then
+        gdbopts="${gdbopts} --init-command=${EDB_GVAL_INIT}"
+    fi
+
+    if [ ! -z ${EDB_GVAL_SRC_DIR} ]; then
+        gdbopts="${gdbopts} --dir=${EDB_GVAL_SRC_DIR}"
+    fi
+
+    gdbopts="${gdbopts} -i=mi ${EDB_GVAL_GDB_ARGS}\""
+    if ps aux | grep -E `whoami` | grep -E "emacs * --daemon" >& /dev/null; then
+        emacsclient -t -e "(gdb ${gdbopts})"
+    else
+        emacs -nw --eval "(gdb ${gdbopts})"
+    fi
+elif [ ${kernel} = "SunOS" ]; then
+    emacs -nw --eval "(dbx \"dbx $*\")"
+else
+    echo "unknown platform: not supported yet"
+    exit 1
+fi
+
+exit $?

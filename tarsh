@@ -1,0 +1,682 @@
+#!/bin/bash
+# -------------------------------------------------------------------------
+# tarsh.sh: create self extracting shell script for given files/dirs
+#
+# Copyright 2016 by Yonghyun Hwang <freeaion@gmail.com>
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+# Some rights reserved.
+# -------------------------------------------------------------------------
+
+#-------------------------------------------------------------
+# Global constants
+#-------------------------------------------------------------
+TARSH_GCONST_VERSION="1.0"
+TARSH_GCONST_CMD="tarsh"
+TARSH_GCONST_PWD="`pwd -P`"
+TARSH_GCONST_OSTYPE="`uname -s`"
+TARSH_GCONST_DEFAULT_OFILE="tarsh_out.sh"
+
+#-------------------------------------------------------------
+# Global variables
+#-------------------------------------------------------------
+TARSH_GVAL_OFILE=""
+TARSH_GVAL_USR_CMD=""
+
+#-------------------------------------------------------------
+# Global arrays
+#-------------------------------------------------------------
+TARSH_GARRAY_TMP_FILES=()
+TARSH_GARRAY_IFILES=()
+
+#-------------------------------------------------------------
+# Function Declaration
+#-------------------------------------------------------------
+function tarsh_prt_cmd_heading
+{
+    echo "======================"
+    echo "${TARSH_GCONST_CMD} ${TARSH_GCONST_VERSION}: create self extracting shell script for given files/dirs"
+    echo ""
+}
+
+function tarsh_prt_usage
+{
+    tarsh_prt_cmd_heading ${EDIFF_GCONST_VERSION}
+    echo 1>&2 Usage: ${TARSH_GCONST_CMD} "[FILE_1|DIR_1] ..."
+    echo " + options:"
+    echo "  --output|-o    specify output filename"
+    echo "                 NOTE: not specified, \"${TARSH_GCONST_DEFAULT_OFILE}\" is used"
+    echo ""
+    echo " + examples:"
+    echo "    1) tar everything under current dir and create \"${TARSH_GCONST_DEFAULT_OFILE}\""
+    echo "       > ${TARSH_GCONST_CMD} ."
+    echo ""
+    echo "    2) tar given files and dirs and create \"abc.sh\""
+    echo "       > ${TARSH_GCONST_CMD} -o abc.sh file1 file2 dir1"
+    echo ""
+}
+
+function tarsh_prt_success
+{
+    echo -n "${TARSH_GCONST_CMD}[SUCCESS|`date +'%m/%d %H:%M'`]: "
+    echo "$@"
+    return 0
+}
+
+function tarsh_prt_error
+{
+    echo -n "${TARSH_GCONST_CMD}[ERROR|`date +'%m/%d %H:%M'`]: "
+    echo "$@"
+    return 0
+}
+
+function tarsh_prt_info
+{
+    echo -n "${TARSH_GCONST_CMD}[INFO|`date +'%m/%d %H:%M'`]: "
+    echo "$@"
+    return 0
+}
+
+function tarsh_get_whoami
+{
+    if [ ${TARSH_GCONST_OSTYPE} = 'Linux' ]; then
+        whoami
+    else
+        local who=(`who am i`)
+        echo ${who[0]}
+    fi
+
+    return 0
+}
+
+function tarsh_readlink
+{
+    local path=${1:-}
+
+    if [ -z ${path} ]; then
+        echo ""
+        return 1
+    fi
+
+    # solaris doesn't have readlink. :'(
+    if [ -d ${path} ]; then
+        pushd ${path} &> /dev/null
+        echo $PWD
+    elif [ -f ${path} ]; then
+        pushd $(dirname ${path}) &> /dev/null
+        echo $PWD/$(basename ${path})
+    else
+        echo ""
+        return 1
+    fi
+    popd &> /dev/null
+
+    return 0
+}
+
+function tarsh_tbz_to_selfext
+{
+    local tbz=${1:-}
+    local selfext=${2:-}
+
+    if [ -z "${selfext}" ]; then
+        prt_error \
+            "not enough parameters"
+        return 1
+    fi
+
+    if [ ! -f "${tbz}" ]; then
+        prt_error \
+            "a given tbz file, ${tbz}, doesn't exist"
+        return 1
+    fi
+
+    if [ -f "${selfext}" ]; then
+        prt_error \
+            "file, ${selfext}, already exists"
+        return 1
+    fi
+
+    local selfextTemplate=${GCONST_PATH_DAT}/${GCONST_SELFEXT_FILE}
+    if [ ! -f ${selfextTemplate} ]; then
+        prt_error \
+            "internal error. cannot find template selfext file in CTENV"
+        return 1
+    fi
+
+    cp -f ${selfextTemplate} ${selfext}
+    {
+        cat ${tbz}
+    } >> ${selfext}
+
+    return 0
+}
+
+function tarsh_mktemp
+{
+    if [ ${TARSH_GCONST_OSTYPE} = 'AIX' ]; then
+        local fn=/tmp/XXX-$(od -N4 -tu /dev/random | awk 'NR==1 {print $2} {}')
+        touch ${fn} && echo ${fn}
+    else
+        mktemp $@
+    fi
+
+    return $?
+}
+
+function tarsh_get_tmp_file
+{
+    local tmpFile=$(tarsh_mktemp /tmp/`tarsh_get_whoami`_TARSH_TMP.XXXXX)
+
+    if [ $? -eq 0 ];then
+        echo ${tmpFile}
+        return 0
+    else
+        echo ""
+        return 1
+    fi
+}
+
+function tarsh_add_tmp_file_list
+{
+    local filename=${1:-}
+    if [ -z ${filename} ]; then
+        return 1
+    else
+        TARSH_GARRAY_TMP_FILES[${#TARSH_GARRAY_TMP_FILES[@]}]=${filename}
+        return 0
+    fi
+}
+
+function tarsh_remove_tmp_files
+{
+    local -i i=0
+    for (( i=0; i<${#TARSH_GARRAY_TMP_FILES[@]}; i++)); do
+        rm -fr ${TARSH_GARRAY_TMP_FILES[i]} >& /dev/null
+    done
+
+    TARSH_GARRAY_TMP_FILES=()
+
+    return 0
+}
+
+# this function is called when ctenv exits
+function tarsh_exit
+{
+    # remove tmp files if any
+    tarsh_remove_tmp_files
+
+    return $?
+}
+trap tarsh_exit INT TERM EXIT
+
+function tarsh_create_self_ext_sh
+{
+    local selfext=${1:-}
+
+    if [ -z ${selfext} ]; then
+        tarsh_prt_error "fail to get a filename for self ext sh"
+        return 1
+    fi
+
+    local tarsh=""
+    if [ ${TARSH_GCONST_CMD} = ${TARSH_GVAL_USR_CMD} ]; then
+        # tarsh would be in $PATH
+        tarsh=`\which ${TARSH_GCONST_CMD} 2>/dev/null`
+        if [ $? -ne 0 ]; then
+            tarsh_prt_error "fail to find ${TARSH_GCONST_CMD}. stop."
+            return 1
+        fi
+    else
+        tarsh="${TARSH_GVAL_USR_CMD}"
+    fi
+
+    local -i TARSH_ARCHIVE_START=`awk '/^__TARSH_SELF_EXT_SH__/ {print NR + 1; exit 0; }' ${tarsh}`
+    if [ ${TARSH_ARCHIVE_START} -eq 0 ]; then
+        tarsh_prt_error "corrupted ${TARSH_GCONST_CMD}. cannot proceed."
+        return 1
+    fi
+
+    tail -n+${TARSH_ARCHIVE_START} ${tarsh} >| ${selfext}
+    if [ $? -eq 0 ]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+function tarsh_cmd_parse
+{
+    if [ $# -eq 0 ]; then
+        tarsh_prt_usage
+        exit 0
+    fi
+
+    TARSH_GVAL_USR_CMD=$0
+    TARSH_GVAL_OFILE="${TARSH_GCONST_DEFAULT_OFILE}"
+
+    while [ $# -gt 0 ]; do    # Until you run out of parameters . . .
+        case "${1}" in
+            --output|-o)
+                shift
+                TARSH_GVAL_OFILE=$1
+                ;;
+            * )
+                if ! tarsh_readlink "${1}" >& /dev/null; then
+                    tarsh_prt_error "invalid path, \"${1}\"."
+                    exit 1
+                fi
+                TARSH_GARRAY_IFILES[${#TARSH_GARRAY_IFILES[@]}]="${1}"
+                ;;
+        esac
+        shift # Check next set of parameters.
+    done
+
+    if [ -f ${TARSH_GVAL_OFILE} ]; then
+        tarsh_prt_error "output file, \"${TARSH_GVAL_OFILE}\", already exists. remove/rename it and try again"
+        exit 1
+    fi
+
+    if [ ${#TARSH_GARRAY_IFILES[@]} -eq 0 ]; then
+        tarsh_prt_info "no files to work"
+        exit 1
+    fi
+
+    return 0
+}
+
+##############################################
+# Main script starts from here!
+
+if ! tarsh_cmd_parse "$@"; then
+    exit 1
+fi
+
+# ifiles can be files + dirs
+ifiles="${TARSH_GARRAY_IFILES[@]}"
+
+# create tmp template ext sh file
+tmpShFile=`tarsh_get_tmp_file`
+if [ -z "${tmpShFile}" ]; then
+    tarsh_prt_error "fail to create output file"
+    exit 1
+fi
+tarsh_add_tmp_file_list ${tmpShFile}
+
+if ! tarsh_create_self_ext_sh ${tmpShFile}; then
+    tarsh_prt_error "fail to create output file"
+    exit 1
+fi
+
+# put a archive mark in the template file
+echo "__TARSH_TAR_ARCHIVE_START__" >> ${tmpShFile}
+
+tarsh_prt_info "creating self ext sh..."
+if tar cvjf - ${ifiles} >> ${tmpShFile}; then
+    tarsh_prt_success "the file is created successfully"
+else
+    tarsh_prt_error "fail to create the file"
+    exit 1
+fi
+
+mv ${tmpShFile} ${TARSH_GVAL_OFILE} && chmod 755 ${TARSH_GVAL_OFILE}
+
+exit 0
+
+
+
+##############################################
+# self ext script starts from here!
+# below is actually data for self ext sh generation. not script. so,
+# don't touch below.
+
+__TARSH_SELF_EXT_SH__
+#!/bin/bash
+# -------------------------------------------------------------------------
+# self-extract script automatically generated by tarsh
+#
+# depending on user's preference, the script can
+#   a) create a directory with files tar-zipped in this script
+#   b) generate a zip file
+# -------------------------------------------------------------------------
+
+TARSH_GCONST_MOBILE_SH="SH"
+TARSH_GCONST_MOBILE_SH_NAME="`basename $0`"
+
+TARSH_GVAL_MOBILE_SH_NAME=""
+
+function tarsh_prt_success
+{
+    echo -n "${TARSH_GCONST_MOBILE_SH_NAME}[SUCCESS|`date +'%m/%d %H:%M'`]::$1: "
+    shift
+    echo "$@"
+    return 0
+}
+
+function tarsh_prt_error
+{
+    echo -n "${TARSH_GCONST_MOBILE_SH_NAME}[ERROR|`date +'%m/%d %H:%M'`]::$1: "
+    shift
+    echo "$@"
+    return 0
+}
+
+function tarsh_prt_info
+{
+    echo -n "${TARSH_GCONST_MOBILE_SH_NAME}[INFO|`date +'%m/%d %H:%M'`]::$1: "
+    shift
+    echo "$@"
+    return 0
+}
+
+function tarsh_confirm_usr_decision
+{
+    local arg=$1
+    local decision=""
+
+    while [ 1 ]
+    do
+        echo -n ${arg} "[Y/N]? "
+        read -n 1 decision
+        echo ""
+
+        decision=`echo $decision |  tr "[:lower:]" "[:upper:]"`
+
+        if [ -z $decision ]; then
+            continue
+        elif [ $decision == "Y" ]; then
+            return 0
+        elif [ $decision == "N" ]; then
+            return 1
+        fi
+    done
+
+    return 0
+}
+
+# solaris doesn't have 'whoami'
+function tarsh_get_whoami
+{
+    local ostype=`uname -s`
+
+    if [ ${ostype} = 'Linux' ]; then
+        whoami
+    else
+        local who=(`who am i`)
+        echo ${who[0]}
+    fi
+
+    return 0
+}
+
+function tarsh_readlink
+{
+    local path=${1:-}
+
+    if [ -z ${path} ]; then
+        echo ""
+        return 1
+    fi
+
+    # solaris doesn't have readlink. :'(
+    if [ -d ${path} ]; then
+        pushd ${path} &> /dev/null
+        echo $PWD
+    elif [ -f ${path} ]; then
+        pushd $(dirname ${path}) &> /dev/null
+        echo $PWD/$(basename ${path})
+    else
+        echo ""
+        return 1
+    fi
+    popd &> /dev/null
+
+    return 0
+}
+
+function tarsh_get_tmp_file
+{
+    local tmpFilename=""
+
+    # handle a prefix
+    if [ -z ${1:-} ]; then
+        tmpFilename=$(mktemp /tmp/`tarsh_get_whoami`_TARSH_TMP.XXXXX)
+    else
+        tmpFilename=$(mktemp /tmp/${1}_`tarsh_get_whoami`_TARSH_TMP.XXXXX)
+    fi
+
+    # handle a suffix
+    if [ ! -z ${2:-} ]; then
+        mv ${tmpFilename} ${tmpFilename}.${2}
+        tmpFilename=${tmpFilename}.${2}
+    fi
+
+    if [ $? -eq 0 ]; then
+        echo ${tmpFilename}
+    else
+        echo ""
+    fi
+
+    return 0
+}
+
+function tarsh_get_tmp_dir
+{
+    local tmpFilename=""
+
+    # handle a prefix
+    if [ -z ${1:-} ]; then
+        tmpFilename=$(mktemp -d /tmp/`tarsh_get_whoami`_TARSH_TMP.XXXXX)
+    else
+        tmpFilename=$(mktemp -d /tmp/${1}_`tarsh_get_whoami`_TARSH_TMP.XXXXX)
+    fi
+
+    # handle a suffix
+    if [ ! -z ${2:-} ]; then
+        mv ${tmpFilename} ${tmpFilename}.${2}
+        tmpFilename=${tmpFilename}.${2}
+    fi
+
+    if [ $? -eq 0 ]; then
+        echo ${tmpFilename}
+    else
+        echo ""
+    fi
+
+    return 0
+}
+
+function tarsh_add_tmp_file_list
+{
+    local filename=${1:-}
+    if [ -z ${filename} ]; then
+        return 1
+    else
+        TARSH_GARRAY_TMP_FILES[${#TARSH_GARRAY_TMP_FILES[@]}]=${filename}
+        return 0
+    fi
+}
+
+function tarsh_remove_tmp_files
+{
+    local -i i=0
+    for (( i=0; i<${#TARSH_GARRAY_TMP_FILES[@]}; i++)); do
+        rm -fr ${TARSH_GARRAY_TMP_FILES[i]} >& /dev/null
+    done
+
+    TARSH_GARRAY_TMP_FILES=()
+
+    return 0
+}
+
+# this function is called when tarsh exits
+function tarsh_exit
+{
+    # remove tmp files if any
+    tarsh_remove_tmp_files
+
+    return $?
+}
+
+trap tarsh_exit INT TERM EXIT
+
+function tarsh_self_extract
+{
+    local srcFile=${1:-}
+    local tgtDir=${2:-}
+
+    if [ -z ${tgtDir} ]; then
+        return 1
+    fi
+
+    if [ ${tgtDir} = "." ]; then
+        tgtDir="${TARSH_GCONST_MOBILE_SH_NAME%.*}"
+    fi
+
+    if [ -d ${tgtDir} ]; then
+        tarsh_prt_error ${TARSH_GCONST_MOBILE_SH} \
+                          "target dir, ${tgtDir}, for extraction exists. please delete it first"
+        return 1
+    fi
+
+    local -i TARSH_ARCHIVE_START=`awk '/^__TARSH_TAR_ARCHIVE_START__/ {print NR + 1; exit 0; }' ${srcFile}`
+    if [ ${TARSH_ARCHIVE_START} -eq 0 ]; then
+        tarsh_prt_error ${TARSH_GCONST_MOBILE_SH} \
+                          "nothing to extract from a file, ${srcFile}"
+        return 1
+    fi
+
+    local -a fileList=(`tail -n+${TARSH_ARCHIVE_START} ${srcFile} | tar tjf -`)
+
+    if [ ${#fileList[@]} -eq 0 ]; then
+        tarsh_prt_error ${TARSH_GCONST_MOBILE_SH} \
+                          "nothing to extract from a file, ${srcFile}"
+        return 1
+    fi
+
+    mkdir -p ${tgtDir}
+
+    tarsh_prt_info ${TARSH_GCONST_MOBILE_SH} \
+                     "extracting files"
+
+    tail -n+${TARSH_ARCHIVE_START} ${srcFile} | \
+        tar -C ${tgtDir} -xvjf - | \
+        xargs -I {} printf "\t%s\n" {}
+
+    tarsh_prt_success ${TARSH_GCONST_MOBILE_SH} \
+                        "extraction complete"
+
+    return 0
+}
+
+function tarsh_gen_zip_file
+{
+    local srcFile=${1:-}
+    local tgtFile=${2:-}
+
+    if [ -z ${tgtFile} ]; then
+        return 1
+    fi
+
+    tarsh_prt_info ${TARSH_GCONST_MOBILE_SH} \
+                     "generating a zip"
+
+    if [ ${tgtFile} = "." ]; then
+        tgtFile="${TARSH_GCONST_MOBILE_SH_NAME%.*}.zip"
+    fi
+
+    if [ -f ${tgtFile} ]; then
+        tarsh_prt_error ${TARSH_GCONST_MOBILE_SH} \
+                          "a file, ${tgtFile}, already exists. please delete it first"
+        return 1
+    fi
+
+    tarsh_prt_info ${TARSH_GCONST_MOBILE_SH} \
+                     "step1: retrieving required files"
+
+    local tmpDir=`tarsh_get_tmp_dir`
+    tarsh_add_tmp_file_list ${tmpDir}
+
+    # extract files to generate a patch
+    rm -fr ${tmpDir}
+    if ! tarsh_self_extract ${srcFile} ${tmpDir}; then
+        tarsh_prt_error ${TARSH_GCONST_MOBILE_SH} \
+                          "failed to retrieve required files. stop here"
+        return 1
+    fi
+
+    tarsh_prt_info ${TARSH_GCONST_MOBILE_SH} \
+                     "step2: creating a zip"
+
+    local tmpFile=`tarsh_get_tmp_file`
+    tarsh_add_tmp_file_list ${tmpFile}
+
+    cd ${tmpDir}
+    rm -f ${tmpFile}
+    zip -9 -r ${tmpFile} *
+    cd - &> /dev/null
+
+    mv -f ${tmpFile} ${tgtFile}
+    tarsh_prt_success ${TARSH_GCONST_MOBILE_SH} \
+                        "a file is generated successfully"
+
+    return 0
+}
+
+# print usage at command level
+function tarsh_prt_usage
+{
+    echo "Usage: ${TARSH_GCONST_MOBILE_SH_NAME} [options]"
+    echo " + available options"
+    echo "    -e [PATH]"
+    echo "       extract files to [PATH]"
+    echo "    -z [ZIP_FILE]"
+    echo "       create a zip file, [ZIP_FILE]"
+
+    return 0
+}
+
+#################################################################
+# main function starts here
+#
+
+if [ $# -eq 0 ]; then
+    tarsh_prt_usage
+    exit 0
+fi
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -e)
+            if [ -z ${2:-} ]; then
+                tarsh_prt_usage
+                exit 1
+            fi
+
+            tarsh_self_extract `tarsh_readlink $0` $2
+            shift
+            ;;
+        -z)
+            if [ -z ${2:-} ]; then
+                tarsh_prt_usage
+                exit 1
+            fi
+
+            tarsh_gen_zip_file `tarsh_readlink $0` $2
+            shift
+            ;;
+        *)
+            tarsh_prt_usage
+            exit 1
+    esac
+    shift
+done
+
+exit $?
+
+#################################################################
+# data starts here
+#
